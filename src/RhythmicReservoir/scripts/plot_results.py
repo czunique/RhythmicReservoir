@@ -5,6 +5,9 @@ import shutil
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.cm import ScalarMappable
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 
 
@@ -16,6 +19,9 @@ GROUPS = {"Positive rhythm": ["P-2", "P-5", "P-10"],
           "Reverse rhythm": ["R-2", "R-5", "R-10"],
           "Compound rhythm": ["C-2", "C-5", "C-10"]}
 COLORS = {"2": "#60a5fa", "5": "#f59e0b", "10": "#dc2626"}
+OIL_CMAP = LinearSegmentedColormap.from_list("oil_rainbow", [
+    "#d500ff", "#6500ff", "#005cff", "#00d8ff", "#00df42", "#fff000", "#ff8a00", "#f00000",
+], N=256)
 
 
 def save(fig, name):
@@ -96,7 +102,7 @@ def figure_06_to_10():
     fig, axes = plt.subplots(3, 3, figsize=(12, 8), sharex=True, sharey=True)
     for row, case_row in enumerate(cases):
         for col, case in enumerate(case_row):
-            im = draw_field(axes[row, col], 1 - field(case), f"{case}", value="So", cmap="YlOrBr", vmin=.2, vmax=.8)
+            im = draw_field(axes[row, col], 1 - field(case), f"{case}", value="So", cmap=OIL_CMAP, vmin=.2, vmax=.8)
             if row < 2:
                 axes[row, col].set_xlabel("")
             if col > 0:
@@ -178,9 +184,83 @@ def figure_18_grid_sensitivity():
     fig.suptitle("Grid-sensitivity analysis", y=1.03); save(fig, "fig18_grid_sensitivity.png")
 
 
+def cell_index(i, j, k):
+    return (k - 1)*50*10 + (j - 1)*50 + (i - 1)
+
+
+def add_quad(polygons, values, so, points, index):
+    polygons.append(points)
+    values.append(so[index])
+
+
+def draw_3d_remaining_oil(ax, case, time_index=-1):
+    with np.load(ROOT / "results_3d" / case / "state_history.npz") as history:
+        so = history["So"][time_index]
+    nx, ny, nz, lx, ly, lz = 50, 10, 20, 500.0, 100.0, 20.0
+    dx, dy, dz = lx/nx, ly/ny, lz/nz
+    polygons, values = [], []
+    for i in range(1, nx + 1):
+        for j in range(1, ny + 1):
+            x0, x1, y0, y1 = (i - 1)*dx, i*dx, (j - 1)*dy, j*dy
+            add_quad(polygons, values, so, [(x0,y0,0),(x1,y0,0),(x1,y1,0),(x0,y1,0)], cell_index(i,j,1))
+            add_quad(polygons, values, so, [(x0,y0,lz),(x0,y1,lz),(x1,y1,lz),(x1,y0,lz)], cell_index(i,j,nz))
+    for i in range(1, nx + 1):
+        for k in range(1, nz + 1):
+            x0, x1, z0, z1 = (i - 1)*dx, i*dx, (k - 1)*dz, k*dz
+            add_quad(polygons, values, so, [(x0,0,z0),(x1,0,z0),(x1,0,z1),(x0,0,z1)], cell_index(i,1,k))
+            add_quad(polygons, values, so, [(x0,ly,z0),(x0,ly,z1),(x1,ly,z1),(x1,ly,z0)], cell_index(i,ny,k))
+    for j in range(1, ny + 1):
+        for k in range(1, nz + 1):
+            y0, y1, z0, z1 = (j - 1)*dy, j*dy, (k - 1)*dz, k*dz
+            add_quad(polygons, values, so, [(0,y0,z0),(0,y0,z1),(0,y1,z1),(0,y1,z0)], cell_index(1,j,k))
+            add_quad(polygons, values, so, [(lx,y0,z0),(lx,y1,z0),(lx,y1,z1),(lx,y0,z1)], cell_index(nx,j,k))
+    norm = Normalize(.2, .8)
+    shell = Poly3DCollection(polygons, facecolors=OIL_CMAP(norm(values)), edgecolors="#2b1b1b", linewidths=.16)
+    ax.add_collection3d(shell)
+    ax.plot([5, 5], [50, 50], [-4, lz], color="#f08bbd", lw=5); ax.text(10, 50, -5, "Inj.", color="#d44e91")
+    ax.plot([495, 495], [50, 50], [-4, lz], color="#62dfe8", lw=5); ax.text(462, 50, -5, "Prod.", color="#21b8c7")
+    ax.set(xlim=(-15, lx + 15), ylim=(-8, ly + 8), zlim=(lz, -8), xlabel="X (m)", ylabel="Y (m)", zlabel="Depth (m)")
+    ax.set_box_aspect((5, 1.25, .82)); ax.view_init(elev=24, azim=-56)
+    ax.tick_params(labelsize=8)
+    return ScalarMappable(norm=norm, cmap=OIL_CMAP)
+
+
+def figure_19_to_22_3d_remaining_oil():
+    for figure_no, case in ((19, "P-5"), (20, "R-5"), (21, "C-5")):
+        fig = plt.figure(figsize=(10, 6.5)); ax = fig.add_subplot(projection="3d")
+        mapper = draw_3d_remaining_oil(ax, case)
+        fig.colorbar(mapper, ax=ax, shrink=.65, pad=.08, label="Oil saturation, So")
+        ax.set_title(f"{case}: 3D terminal remaining-oil distribution\n(2001 days, 0.400 injected PV)")
+        save(fig, f"fig{figure_no:02d}_{case}_terminal_3d_remaining_oil.png")
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5.7), subplot_kw={"projection": "3d"})
+    for ax, case in zip(axes, ("P-5", "R-5", "C-5")):
+        mapper = draw_3d_remaining_oil(ax, case)
+        ax.set_title(case)
+    fig.colorbar(mapper, ax=axes, shrink=.66, pad=.05, label="Oil saturation, So")
+    fig.suptitle("3D terminal remaining-oil comparison (contrast = 5, 2001 days)", y=.97)
+    save(fig, "fig22_3d_terminal_remaining_oil_comparison.png")
+
+
+def figure_23_to_25_3d_saturation_evolution():
+    for figure_no, case in ((23, "P-5"), (24, "R-5"), (25, "C-5")):
+        with np.load(ROOT / "results_3d" / case / "state_history.npz") as history:
+            time_day, pvi = history["time_day"], history["injected_pv"]
+        indices = [np.abs(pvi - target).argmin() for target in (0.0, 0.1, 0.2, 0.4)]
+        fig, axes = plt.subplots(2, 2, figsize=(14, 9), subplot_kw={"projection": "3d"})
+        for ax, index in zip(axes.flat, indices):
+            mapper = draw_3d_remaining_oil(ax, case, index)
+            ax.set_title(f"{time_day[index]:.0f} d · {pvi[index]:.3f} PV", fontsize=11)
+        fig.colorbar(mapper, ax=axes, shrink=.67, pad=.04, label="Oil saturation, So")
+        fig.suptitle(f"{case}: 3D oil-saturation evolution", y=.96)
+        save(fig, f"fig{figure_no:02d}_{case}_3d_oil_saturation_evolution.png")
+
+
 if __name__ == "__main__":
     figure_01_to_05()
     figure_06_to_10()
     figure_11_to_17()
     figure_18_grid_sensitivity()
+    figure_19_to_22_3d_remaining_oil()
+    figure_23_to_25_3d_saturation_evolution()
     print(FIGURES)

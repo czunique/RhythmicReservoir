@@ -106,6 +106,35 @@ function write_matrix(path, data)
     writedlm(path, data, ',')
 end
 
+function write_state_history(path, state0, states, n, nc, time_day, pvi, bar)
+    nt = n + 1
+    sw_history = Matrix{Float32}(undef, nc, nt)
+    pressure_history = Matrix{Float32}(undef, nc, nt)
+    sw_history[:, 1] .= state0[:Reservoir][:Saturations][1, :]
+    pressure_history[:, 1] .= state0[:Reservoir][:Pressure]./(10*bar)
+    for ix in 1:n
+        sw_history[:, ix + 1] .= states[ix][:Saturations][1, :]
+        pressure_history[:, ix + 1] .= states[ix][:Pressure]./(10*bar)
+    end
+    open(path, "w") do io
+        write(io, Int32(nt)); write(io, Int32(nc))
+        write(io, vcat(0.0, time_day)); write(io, vcat(0.0, pvi))
+        write(io, sw_history); write(io, pressure_history)
+    end
+end
+
+function write_terminal_cells(path, mesh, sw, profile_md, nx, ny, nz, lx, ly, lz)
+    open(path, "w") do io
+        println(io, "i,j,k,x_m,y_m,depth_m,Sw,So,permeability_md")
+        for k in 1:nz, j in 1:ny, i in 1:nx
+            cell = cell_index(mesh, (i, j, k))
+            println(io, join((i, j, k,
+                (i - 0.5)*lx/nx, (j - 0.5)*ly/ny, (k - 0.5)*lz/nz,
+                sw[cell], 1 - sw[cell], profile_md[k]), ','))
+        end
+    end
+end
+
 function write_summary(path, time_day, pvi, qo, qw, cumulative_oil, cumulative_water, rf, injector_bhp, producer_bhp)
     open(path, "w") do io
         println(io, "time_day,injected_pv,oil_rate_m3_day,water_rate_m3_day,liquid_rate_m3_day,water_cut,cumulative_oil_m3,cumulative_water_m3,recovery_factor,injector_bhp_mpa,producer_bhp_mpa")
@@ -123,20 +152,24 @@ function event_value(pvi, rf, fw, threshold)
     return isnothing(ix) ? (missing, missing) : (pvi[ix], rf[ix])
 end
 
-function run_case(case_name::String, rhythm::Symbol, contrast::Real, root::String)
+function run_case(case_name::String, rhythm::Symbol, contrast::Real, root::String;
+        grid = (NX, NY, NZ), lengths = (LX, LY, LZ), results_dir = "results")
     Darcy, bar, kg, meter, day = si_units(:darcy, :bar, :kilogram, :meter, :day)
-    profile_md = permeability_profile(rhythm, contrast)
-    mesh = reservoir_mesh((NX, NY, NZ), (LX*meter, LY*meter, LZ*meter))
-    nc = NX*NY*NZ
+    nx, ny, nz = grid
+    lx, ly, lz = lengths
+    profile_md = permeability_profile(rhythm, contrast, nz)
+    mesh = reservoir_mesh((nx, ny, nz), (lx*meter, ly*meter, lz*meter))
+    nc = nx*ny*nz
     permeability = zeros(3, nc)
-    for k in 1:NZ, j in 1:NY, i in 1:NX
+    for k in 1:nz, j in 1:ny, i in 1:nx
         cell = cell_index(mesh, (i, j, k))
         kh = profile_md[k]*1e-3*Darcy
         permeability[:, cell] .= (kh, kh, 0.10*kh)
     end
     domain = reservoir_domain(mesh, permeability = permeability, porosity = POROSITY)
-    injector = setup_vertical_well(domain, 1, 1, name = :Injector)
-    producer = setup_vertical_well(domain, NX, 1, name = :Producer)
+    well_j = cld(ny, 2)
+    injector = setup_vertical_well(domain, 1, well_j, name = :Injector)
+    producer = setup_vertical_well(domain, nx, well_j, name = :Producer)
 
     rho_w, rho_o = 1000.0*kg/meter^3, 850.0*kg/meter^3
     system = ImmiscibleSystem((AqueousPhase(), LiquidPhase()), reference_densities = [rho_w, rho_o])
@@ -180,28 +213,45 @@ function run_case(case_name::String, rhythm::Symbol, contrast::Real, root::Strin
     terminal_index = something(findfirst(>=(0.98), water_cut), n)
     _, rf98 = event_value(pvi, rf, water_cut, 0.98)
 
-    case_dir = joinpath(root, "results", case_name)
+    case_dir = joinpath(root, results_dir, case_name)
     mkpath(case_dir)
+    write_state_history(joinpath(case_dir, "state_history.bin"), state0, states, n, nc,
+        time_day, pvi, bar)
     write_summary(joinpath(case_dir, "summary.csv"), time_day, pvi, oil_rate, water_rate,
         cumulative_oil, cumulative_water, rf, injector_bhp, producer_bhp)
-    write_matrix(joinpath(case_dir, "permeability_md.csv"), reshape(profile_md, NZ, 1))
+    write_matrix(joinpath(case_dir, "permeability_md.csv"), reshape(profile_md, nz, 1))
     snapshots = Dict("0p0" => state0[:Reservoir][:Saturations][1, :])
+    snapshot_indices = Dict("0p0" => 0)
     for target in (0.1, 0.3, 0.5, 1.0)
         ix = argmin(abs.(pvi .- target))
-        snapshots[replace(string(target), "." => "p")] = states[ix][:Saturations][1, :]
+        label = replace(string(target), "." => "p")
+        snapshots[label] = states[ix][:Saturations][1, :]
+        snapshot_indices[label] = ix
     end
     snapshots["terminal"] = states[terminal_index][:Saturations][1, :]
+    snapshot_indices["terminal"] = terminal_index
     for (label, sw) in snapshots
-        sw_xz = permutedims(reshape(sw, NX, NY, NZ)[:, 1, :], (2, 1))
+        sw_xz = permutedims(reshape(sw, nx, ny, nz)[:, well_j, :], (2, 1))
         write_matrix(joinpath(case_dir, "sw_$(label).csv"), sw_xz)
     end
     final_sw = snapshots["terminal"]
     final_so = 1 .- final_sw
-    layer_so = [sum(final_so[cell_index(mesh, (i, 1, k))] for i in 1:NX)/NX for k in 1:NZ]
+    layer_so = [sum(final_so[cell_index(mesh, (i, j, k))] for i in 1:nx, j in 1:ny)/(nx*ny) for k in 1:nz]
     open(joinpath(case_dir, "layer_results.csv"), "w") do io
         println(io, "layer,depth_m,permeability_md,porosity,avg_So")
-        for k in 1:NZ
-            println(io, join((k, (k-0.5)*LZ/NZ, profile_md[k], POROSITY, layer_so[k]), ','))
+        for k in 1:nz
+            println(io, join((k, (k-0.5)*lz/nz, profile_md[k], POROSITY, layer_so[k]), ','))
+        end
+    end
+    open(joinpath(case_dir, "snapshot_times.csv"), "w") do io
+        println(io, "label,time_day,injected_pv")
+        for label in ("0p0", "0p1", "0p3", "terminal")
+            ix = snapshot_indices[label]
+            time = ix == 0 ? 0.0 : time_day[ix]
+            injected_pv = ix == 0 ? 0.0 : pvi[ix]
+            println(io, join((label, time, injected_pv), ','))
+            write_terminal_cells(joinpath(case_dir, "cells_$(label).csv"), mesh, snapshots[label], profile_md,
+                nx, ny, nz, lx, ly, lz)
         end
     end
     return (; case_name, rhythm, contrast, pore_volume_m3, pvb, rfb, rf80, rf90, rf98,
