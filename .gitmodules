@@ -1,0 +1,3 @@
+[submodule "src/JutulDarcy.jl"]
+	path = src/JutulDarcy.jl
+	url = https://github.com/sintefmath/JutulDarcy.jl.git

@@ -1,0 +1,30 @@
+# 作业 1 的统一概念模型；本阶段不施加注采控制，也不运行水驱。
+model_name = "Rhythmic reservoir conceptual model"
+
+[grid]
+nx = 50
+ny = 1
+nz = 20
+length_x_m = 500.0
+length_y_m = 20.0
+length_z_m = 20.0
+
+[rock]
+porosity = 0.20
+permeability_md = 500.0
+vertical_to_horizontal_permeability = 0.10
+
+[initial_state]
+pressure_mpa = 20.0
+water_saturation = 0.20
+oil_saturation = 0.80
+
+[wells]
+injector_name = "Injector"
+injector_i = 1
+injector_j = 1
+producer_name = "Producer"
+producer_i = 50
+producer_j = 1
+completion_k_start = 1
+completion_k_end = 20
